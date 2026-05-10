@@ -1,5 +1,6 @@
 .git/
 .claude/
+.idea/
 __pycache__/
 other/
 *.zip
