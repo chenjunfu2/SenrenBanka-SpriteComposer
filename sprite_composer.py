@@ -228,13 +228,39 @@ class SpriteComposer(tk.Tk):
             stand = cp.get(section, 'stand', fallback='')
             if not stand:
                 continue
+            decorations_raw = cp.get(section, 'decorations', fallback='')
+            deco_specs = self._parse_decorations(decorations_raw)
             self.characters[section] = {
                 'name': section,
                 'stand': stand,
+                'decorations': deco_specs,
             }
 
         if not self.characters:
             messagebox.showwarning("警告", "config.ini 中没有找到角色配置。")
+
+    @staticmethod
+    def _parse_decorations(raw):
+        """Parse decorations config string.
+        Format: "显示名: 匹配关键词 [, bind: 服装关键词]; ..."
+        Returns list of (display_name, match_pattern, bind_keyword_or_None).
+        """
+        if not raw or not raw.strip():
+            return []
+        specs = []
+        for item in raw.split(';'):
+            item = item.strip()
+            if not item:
+                continue
+            bind_keyword = None
+            if ', bind:' in item:
+                item, bind_part = item.split(', bind:', 1)
+                bind_keyword = bind_part.strip()
+            if ':' not in item:
+                continue
+            name, pattern = item.split(':', 1)
+            specs.append((name.strip(), pattern.strip(), bind_keyword))
+        return specs
 
     def _build_ui(self):
         ttk.Label(self, text="选择角色", font=("", 16, "bold")).pack(pady=15)
@@ -297,14 +323,19 @@ class CharacterEditor(tk.Toplevel):
         self.resolution = tk.StringVar(value="high")
         self.selected_dress = tk.StringVar()
         self.selected_face = tk.StringVar()
-        self.deco_kemonomimi = tk.BooleanVar(value=False)
         self.deco_hoho = tk.BooleanVar(value=False)
 
         # Dress display mapping: display_name -> set of resource names
         self._dress_display_map = {}
 
+        # Dynamic decorations (from config.ini): list of (display_name, match_pattern, bind_keyword)
+        self._deco_specs = cfg.get('decorations', [])
+        # Runtime decoration state
+        self._deco_vars = {}       # display_name -> tk.BooleanVar
+        self._deco_widgets = {}    # display_name -> ttk.Checkbutton
+        self._deco_available = {}  # display_name -> bool (per current variant)
+
         # Character-level feature flags (set in _load_data)
-        self._has_kemonomimi = False
         self._has_hoho = {}  # variant_key -> bool
 
         # Missing file tracking
@@ -354,12 +385,10 @@ class CharacterEditor(tk.Toplevel):
             messagebox.showerror("错误", "stand 文件中没有找到变体。")
             return
 
-        # Detect character-level features: ケモミミ presence in any layer
+        # Detect feature flags per variant
         for key, data in self.variant_data.items():
             for res_key in ['layers_hd', 'layers_ld']:
                 for layer in data.get(res_key, []):
-                    if 'ケモミミ' in layer['name']:
-                        self._has_kemonomimi = True
                     if layer['name'] == '頬':
                         self._has_hoho[key] = True
 
@@ -453,14 +482,16 @@ class CharacterEditor(tk.Toplevel):
         # Dress list
         dress_frame = ttk.LabelFrame(left_panel, text="服装", padding=5)
         dress_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 5))
-        self._dress_list = tk.Listbox(dress_frame, height=8, exportselection=False)
+        self._dress_list = tk.Listbox(dress_frame, height=8, width=26,
+                                     exportselection=False)
         self._dress_list.pack(fill=tk.BOTH, expand=True)
         self._dress_list.bind('<ButtonRelease-1>', self._on_dress_click)
 
         # Face list
         face_frame = ttk.LabelFrame(left_panel, text="表情", padding=5)
         face_frame.grid(row=2, column=0, columnspan=2, sticky="ns", pady=(0, 5))
-        self._face_list = tk.Listbox(face_frame, height=20, exportselection=False)
+        self._face_list = tk.Listbox(face_frame, height=20, width=26,
+                                     exportselection=False)
         self._face_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         face_scroll = ttk.Scrollbar(face_frame, orient="vertical",
                                     command=self._face_list.yview)
@@ -468,22 +499,26 @@ class CharacterEditor(tk.Toplevel):
         self._face_list.config(yscrollcommand=face_scroll.set)
         self._face_list.bind('<ButtonRelease-1>', self._on_face_click)
 
-        # Decorations — data-driven visibility
+        # Decorations — data-driven from config.ini
         deco_frame = ttk.LabelFrame(left_panel, text="装饰物（独立勾选）", padding=5)
         deco_frame.grid(row=3, column=0, columnspan=2, sticky="ew")
 
-        # ケモミミ (data-driven: hidden if no character has it)
-        self._kemono_cb = ttk.Checkbutton(deco_frame, text="ケモミミ（兽耳）",
-                                          variable=self.deco_kemonomimi,
-                                          command=self._on_change)
-        if self._has_kemonomimi:
-            self._kemono_cb.pack(anchor="w")
+        # Dynamic decoration checkboxes (from config.ini)
+        self._deco_vars = {}
+        self._deco_widgets = {}
+        self._deco_available = {}
+        for display_name, match_pattern, bind_keyword in self._deco_specs:
+            var = tk.BooleanVar(value=False)
+            self._deco_vars[display_name] = var
+            cb = ttk.Checkbutton(deco_frame, text=display_name, variable=var,
+                                command=self._on_change)
+            self._deco_widgets[display_name] = cb
 
-        # 頬 (data-driven: hidden if current variant has no 頬 layer)
+        # 頬 — special case with exact name match (per design doc 11.2)
         self._hoho_cb = ttk.Checkbutton(deco_frame, text="頬（脸颊红晕）",
                                         variable=self.deco_hoho,
                                         command=self._on_change)
-        self._update_hoho_visibility()
+        self._update_deco_visibility()
 
         # ---- Right panel: preview ----
         preview_frame = ttk.Frame(self, padding=5)
@@ -542,13 +577,33 @@ class CharacterEditor(tk.Toplevel):
         # Populate dress/face lists now that all widgets exist
         self._repopulate_lists()
 
-    def _update_hoho_visibility(self):
-        """Show/hide the 頬 checkbox based on whether the current variant has a 頬 layer."""
+    def _update_deco_visibility(self):
+        """Show/hide decoration checkboxes based on current variant's available layers."""
+        layers, _, _ = self._get_layers()
+
+        # Dynamic decorations: show if any layer name contains the match pattern
+        for display_name, match_pattern, _bind_keyword in self._deco_specs:
+            cb = self._deco_widgets.get(display_name)
+            if cb is None:
+                continue
+            available = any(match_pattern in l['name'] for l in layers
+                           if l['layer_type'] == 0)
+            self._deco_available[display_name] = available
+            if available:
+                cb.pack(anchor="w")
+            else:
+                cb.pack_forget()
+                var = self._deco_vars.get(display_name)
+                if var is not None:
+                    var.set(False)
+
+        # Special: 頬 — exact name match
         key = self.stand_var.get()
         if key and self._has_hoho.get(key, False):
             self._hoho_cb.pack(anchor="w")
         else:
             self._hoho_cb.pack_forget()
+            self.deco_hoho.set(False)
 
     # ============================================================
     # Event handlers
@@ -570,14 +625,14 @@ class CharacterEditor(tk.Toplevel):
             self._current = None
             self._png_cache.clear()
             self._repopulate_lists()
-            self._update_hoho_visibility()
+            self._update_deco_visibility()
         else:
             self.stand_var.set(new_val)
             if new_val in self.variant_data:
                 self._current = self.variant_data[new_val]
                 self._png_cache.clear()
                 self._repopulate_lists()
-                self._update_hoho_visibility()
+                self._update_deco_visibility()
         self._update_preview()
 
     def _on_res_click(self, event):
@@ -837,26 +892,24 @@ class CharacterEditor(tk.Toplevel):
         dress = self.selected_dress.get()
         face_code = self.selected_face.get()
 
-        # No dress selected → empty preview (10.4)
-        if not dress:
-            return set()
-
         resource_names = set()
 
         # Dress resources (from expanded display map)
-        if dress in self._dress_display_map:
+        if dress and dress in self._dress_display_map:
             resource_names.update(self._dress_display_map[dress])
 
         # Common resources (intersection of ALL dress+diff resource sets)
-        all_sets = []
-        for dress_name, diffs in dresses.items():
-            for diff_num, resources in diffs.items():
-                all_sets.append(resources)
-        if all_sets:
-            common = all_sets[0].copy()
-            for s in all_sets[1:]:
-                common &= s
-            resource_names.update(common)
+        # Only added when a dress is selected (14.3: allow face/deco without dress)
+        if dress:
+            all_sets = []
+            for dress_name, diffs in dresses.items():
+                for diff_num, resources in diffs.items():
+                    all_sets.append(resources)
+            if all_sets:
+                common = all_sets[0].copy()
+                for s in all_sets[1:]:
+                    common &= s
+                resource_names.update(common)
 
         # Face resources
         if face_code and face_code in faces:
@@ -867,15 +920,31 @@ class CharacterEditor(tk.Toplevel):
                     layer_name = resource_path
                 resource_names.add(layer_name)
 
-        # Decoration: ケモミミ
-        if self.deco_kemonomimi.get():
-            for layer in layers:
-                if 'ケモミミ' in layer['name']:
-                    resource_names.add(layer['name'])
-        else:
-            resource_names = {n for n in resource_names if 'ケモミミ' not in n}
+        # Dynamic decorations (from config.ini)
+        for display_name, match_pattern, bind_keyword in self._deco_specs:
+            if not self._deco_available.get(display_name, False):
+                continue
+            var = self._deco_vars.get(display_name)
+            if var is None:
+                continue
 
-        # Decoration: 頬 — find by name
+            if var.get():
+                # If bound to current dress, dress already provides specific variant
+                is_bound = bind_keyword is not None and dress and bind_keyword in dress
+                if not is_bound:
+                    for layer in layers:
+                        if match_pattern in layer['name']:
+                            resource_names.add(layer['name'])
+            else:
+                # Preserve dress-provided resources matching this pattern (BUG-4 fix)
+                dress_deco = set()
+                if dress and dress in self._dress_display_map:
+                    dress_deco = {n for n in self._dress_display_map[dress]
+                                  if match_pattern in n}
+                resource_names = {n for n in resource_names
+                                  if match_pattern not in n or n in dress_deco}
+
+        # Special: 頬 — exact name match (per design doc 11.2)
         if self.deco_hoho.get():
             for layer in layers:
                 if layer['name'] == '頬':
@@ -971,20 +1040,19 @@ class CharacterEditor(tk.Toplevel):
                             if l['layer_type'] == 0 and l['layer_id'] in visible_ids)
         self._status_label.config(text=f"可见图层: {visible_count}")
 
-        # Update ケモミミ checkbox state: disable if selected dress already has ears
-        if self._has_kemonomimi:
-            dress = self.selected_dress.get()
-            if dress and dress in self._dress_display_map:
-                dress_has_ears = any(
-                    'ケモミミ' in r for r in self._dress_display_map[dress]
-                )
-                if dress_has_ears:
-                    self._kemono_cb.state(['disabled'])
-                    self.deco_kemonomimi.set(False)
-                else:
-                    self._kemono_cb.state(['!disabled'])
+        # Update dynamic decoration bind states: auto-enable + disable when
+        # selected dress matches a decoration's bind keyword
+        dress = self.selected_dress.get()
+        for display_name, _match_pattern, bind_keyword in self._deco_specs:
+            cb = self._deco_widgets.get(display_name)
+            var = self._deco_vars.get(display_name)
+            if cb is None or var is None:
+                continue
+            if bind_keyword and dress and bind_keyword in dress:
+                cb.state(['disabled'])
+                var.set(True)
             else:
-                self._kemono_cb.state(['!disabled'])
+                cb.state(['!disabled'])
 
         # Show missing file warning if new files are missing
         if self._missing_paths and self._missing_paths != self._last_warned_missing:
