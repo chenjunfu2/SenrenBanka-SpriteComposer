@@ -1,0 +1,6 @@
+.git/
+.claude/
+__pycache__/
+other/
+*.zip
+bug.md

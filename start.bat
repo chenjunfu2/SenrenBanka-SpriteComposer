@@ -1,0 +1,2 @@
+python sprite_composer.py
+pause
