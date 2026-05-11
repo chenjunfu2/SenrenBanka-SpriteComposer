@@ -489,8 +489,8 @@ class CharacterEditor(tk.Toplevel):
 
         # Face list
         face_frame = ttk.LabelFrame(left_panel, text="表情", padding=5)
-        face_frame.grid(row=2, column=0, columnspan=2, sticky="ns", pady=(0, 5))
-        self._face_list = tk.Listbox(face_frame, height=20, width=26,
+        face_frame.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=(0, 5))
+        self._face_list = tk.Listbox(face_frame, height=20, width=30,
                                      exportselection=False)
         self._face_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         face_scroll = ttk.Scrollbar(face_frame, orient="vertical",
@@ -504,10 +504,13 @@ class CharacterEditor(tk.Toplevel):
         deco_frame.grid(row=3, column=0, columnspan=2, sticky="ew")
 
         # Dynamic decoration checkboxes (from config.ini)
+        # Only non-bound decorations get checkboxes — bound ones follow dress (BUG-4)
         self._deco_vars = {}
         self._deco_widgets = {}
         self._deco_available = {}
         for display_name, match_pattern, bind_keyword in self._deco_specs:
+            if bind_keyword:
+                continue  # Dress-driven, no independent toggle
             var = tk.BooleanVar(value=False)
             self._deco_vars[display_name] = var
             cb = ttk.Checkbutton(deco_frame, text=display_name, variable=var,
@@ -1039,20 +1042,6 @@ class CharacterEditor(tk.Toplevel):
         visible_count = sum(1 for l in layers
                             if l['layer_type'] == 0 and l['layer_id'] in visible_ids)
         self._status_label.config(text=f"可见图层: {visible_count}")
-
-        # Update dynamic decoration bind states: auto-enable + disable when
-        # selected dress matches a decoration's bind keyword
-        dress = self.selected_dress.get()
-        for display_name, _match_pattern, bind_keyword in self._deco_specs:
-            cb = self._deco_widgets.get(display_name)
-            var = self._deco_vars.get(display_name)
-            if cb is None or var is None:
-                continue
-            if bind_keyword and dress and bind_keyword in dress:
-                cb.state(['disabled'])
-                var.set(True)
-            else:
-                cb.state(['!disabled'])
 
         # Show missing file warning if new files are missing
         if self._missing_paths and self._missing_paths != self._last_warned_missing:
