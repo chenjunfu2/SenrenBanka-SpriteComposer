@@ -354,7 +354,6 @@ class CharacterEditor(tk.Toplevel):
 
         self._load_data()
         self._build_ui()
-        self._update_preview()
 
         self.geometry("1100x750")
         self.minsize(800, 500)
@@ -1113,6 +1112,7 @@ class CharacterEditor(tk.Toplevel):
         new_h = int(img.height * scale)
 
         if new_w < 1 or new_h < 1:
+            self._canvas.delete("all")
             return
 
         bg = self._make_checkered_bg(new_w, new_h, max(8, int(16 * scale)))
