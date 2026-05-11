@@ -11,7 +11,7 @@ from tkinter import ttk, filedialog, messagebox
 from configparser import ConfigParser
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageTk
+from PIL import Image, ImageChops, ImageDraw, ImageTk
 
 # ============================================================
 # UTF-16-LE file handling
@@ -907,11 +907,31 @@ class CharacterEditor(tk.Toplevel):
         dress = self.selected_dress.get()
         face_code = self.selected_face.get()
 
-        resource_names = set()
+        # Build group name -> group_layer_id mapping (BUG-10)
+        group_name_to_id = {}
+        for layer in layers:
+            if layer['layer_type'] == 2:
+                group_name_to_id[layer['name']] = layer['layer_id']
 
-        # Dress resources (from expanded display map)
+        # resource_groups: name -> allowed group_layer_ids or None (any group OK)
+        resource_groups = {}
+
+        def add_resource(name, allowed_groups):
+            """allowed_groups: set of group_layer_ids, or None for no restriction."""
+            if name in resource_groups:
+                existing = resource_groups[name]
+                if existing is not None and allowed_groups is not None:
+                    existing.update(allowed_groups)
+                elif allowed_groups is None:
+                    resource_groups[name] = None
+            else:
+                resource_groups[name] = (allowed_groups.copy()
+                                         if allowed_groups is not None else None)
+
+        # Dress resources (from expanded display map) — group 0 only (BUG-10)
         if dress and dress in self._dress_display_map:
-            resource_names.update(self._dress_display_map[dress])
+            for name in self._dress_display_map[dress]:
+                add_resource(name, {0})
 
         # Common resources (intersection of ALL dress+diff resource sets)
         # Only added when a dress is selected (14.3: allow face/deco without dress)
@@ -924,16 +944,34 @@ class CharacterEditor(tk.Toplevel):
                 common = all_sets[0].copy()
                 for s in all_sets[1:]:
                     common &= s
-                resource_names.update(common)
+                for name in common:
+                    add_resource(name, {0})
 
-        # Face resources
+        # Face resources — group-aware matching (BUG-10) + n-suffix base auto-include (BUG-14)
         if face_code and face_code in faces:
-            for resource_path in faces[face_code]:
-                if '/' in resource_path:
-                    layer_name = resource_path.split('/', 1)[1]
-                else:
-                    layer_name = resource_path
-                resource_names.add(layer_name)
+            face_codes_to_load = [face_code]
+            if face_code.endswith('n'):
+                base_code = face_code.rstrip('n')
+                if base_code in faces:
+                    face_codes_to_load.append(base_code)
+
+            for fc in face_codes_to_load:
+                for resource_path in faces[fc]:
+                    if '/' in resource_path:
+                        group_name, layer_name = resource_path.split('/', 1)
+                        group_id = group_name_to_id.get(group_name)
+                        add_resource(layer_name, {group_id if group_id is not None else 0})
+                    else:
+                        add_resource(resource_path, {0})
+
+        # BUG-11: auto-add 髪かぶせ when face is selected (face-only preview fix)
+        if face_code:
+            has_kabuse = any(
+                l['layer_type'] == 0 and l['name'] == '髪かぶせ'
+                for l in layers
+            )
+            if has_kabuse and '髪かぶせ' not in resource_groups:
+                add_resource('髪かぶせ', {0})
 
         # Dynamic decorations (from config.ini)
         for display_name, match_pattern, bind_keyword in self._deco_specs:
@@ -947,31 +985,64 @@ class CharacterEditor(tk.Toplevel):
                 # If bound to current dress, dress already provides specific variant
                 is_bound = bind_keyword is not None and dress and bind_keyword in dress
                 if not is_bound:
-                    for layer in layers:
-                        if match_pattern in layer['name']:
-                            resource_names.add(layer['name'])
+                    # BUG-12: tear decoration — match by face number prefix
+                    if match_pattern == '涙':
+                        self._add_tear_resources(layers, face_code, add_resource)
+                    else:
+                        for layer in layers:
+                            if match_pattern in layer['name']:
+                                add_resource(layer['name'], None)
             else:
                 # Preserve dress-provided resources matching this pattern (BUG-4 fix)
                 dress_deco = set()
                 if dress and dress in self._dress_display_map:
                     dress_deco = {n for n in self._dress_display_map[dress]
                                   if match_pattern in n}
-                resource_names = {n for n in resource_names
-                                  if match_pattern not in n or n in dress_deco}
+                resource_groups = {n: g for n, g in resource_groups.items()
+                                   if match_pattern not in n or n in dress_deco}
 
         # Special: 頬 — exact name match (per design doc 11.2)
         if self.deco_hoho.get():
-            for layer in layers:
-                if layer['name'] == '頬':
-                    resource_names.add(layer['name'])
+            add_resource('頬', None)
 
-        # Match resource names to layer_ids
+        # Match resource names to layer_ids with group awareness (BUG-10)
         visible_ids = set()
         for layer in layers:
-            if layer['layer_type'] == 0 and layer['name'] in resource_names:
+            if layer['layer_type'] != 0:
+                continue
+            name = layer['name']
+            if name not in resource_groups:
+                continue
+            allowed = resource_groups[name]
+            if allowed is None:
+                visible_ids.add(layer['layer_id'])
+            elif layer['group_layer_id'] in allowed:
                 visible_ids.add(layer['layer_id'])
 
         return visible_ids
+
+    def _add_tear_resources(self, layers, face_code, add_resource):
+        """BUG-12: Add tear decoration layers matched by face number prefix."""
+        if face_code:
+            face_num = re.match(r'(\d+)', face_code)
+            if face_num:
+                prefix = face_num.group(1)
+                found = False
+                for layer in layers:
+                    if layer['layer_type'] != 0:
+                        continue
+                    if '涙' not in layer['name']:
+                        continue
+                    m = re.match(r'(\d+)', layer['name'])
+                    if m and m.group(1).endswith(prefix):
+                        add_resource(layer['name'], None)
+                        found = True
+                if found:
+                    return
+        # Fallback: generic 涙 layer (no number prefix)
+        for layer in layers:
+            if layer['layer_type'] == 0 and layer['name'] == '涙':
+                add_resource(layer['name'], None)
 
     def _composite(self):
         """Build the full-resolution composite image. Returns PIL Image.
@@ -1020,7 +1091,7 @@ class CharacterEditor(tk.Toplevel):
             max_x = max(max_x, right)
             max_y = max(max_y, bottom)
 
-            layer_images.append((img, left, top))
+            layer_images.append((img, left, top, layer.get('image_type', 13)))
 
         if not layer_images:
             return Image.new("RGBA", (1, 1), (0, 0, 0, 0))
@@ -1031,8 +1102,23 @@ class CharacterEditor(tk.Toplevel):
 
         composite = Image.new("RGBA", (final_w, final_h), (0, 0, 0, 0))
         # Reverse file order so that body (end of file) is drawn first = bottom
-        for img, left, top in reversed(layer_images):
-            composite.alpha_composite(img, (left - min_x, top - min_y))
+        for img, left, top, image_type in reversed(layer_images):
+            dx = left - min_x
+            dy = top - min_y
+            if image_type == 16:
+                # Multiply blend for darkening effects (BUG-13)
+                region = composite.crop((dx, dy, dx + img.width, dy + img.height))
+                region_rgb = region.convert('RGB')
+                overlay_rgb = img.convert('RGB')
+                multiplied = ImageChops.multiply(region_rgb, overlay_rgb)
+                multiplied_rgba = multiplied.convert('RGBA')
+                multiplied_rgba.putalpha(region.getchannel('A'))
+                if img.mode == 'RGBA':
+                    composite.paste(multiplied_rgba, (dx, dy), img.split()[3])
+                else:
+                    composite.paste(multiplied_rgba, (dx, dy))
+            else:
+                composite.alpha_composite(img, (dx, dy))
 
         return composite
 
