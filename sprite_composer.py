@@ -482,8 +482,12 @@ class CharacterEditor(tk.Toplevel):
         dress_frame = ttk.LabelFrame(left_panel, text="服装", padding=5)
         dress_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 5))
         self._dress_list = tk.Listbox(dress_frame, height=8, width=26,
-                                     exportselection=False)
-        self._dress_list.pack(fill=tk.BOTH, expand=True)
+                                      exportselection=False)
+        self._dress_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        dress_scroll = ttk.Scrollbar(dress_frame, orient="vertical",
+                                     command=self._dress_list.yview)
+        dress_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self._dress_list.config(yscrollcommand=dress_scroll.set)
         self._dress_list.bind('<ButtonRelease-1>', self._on_dress_click)
 
         # Face list
