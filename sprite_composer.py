@@ -344,7 +344,7 @@ class CharacterEditor(tk.Toplevel):
 
         # Preview state
         self._composite_image = None
-        self._preview_scale = 1.0
+        self._preview_scale = 0.0
         self._render_pending = False
         self._png_cache = {}  # path -> PIL.Image (cleared on resolution/stand change)
         self._zoom_after_id = None
@@ -801,6 +801,15 @@ class CharacterEditor(tk.Toplevel):
         self._canvas.scan_dragto(event.x, event.y, gain=1)
 
     def _on_zoom(self, event):
+        # If in fit mode, resolve actual scale before applying zoom delta (BUG-6)
+        if self._preview_scale <= 0 and self._composite_image:
+            canvas_w = self._canvas.winfo_width()
+            canvas_h = self._canvas.winfo_height()
+            if canvas_w >= 10 and canvas_h >= 10:
+                scale_w = (canvas_w - 20) / self._composite_image.width
+                scale_h = (canvas_h - 20) / self._composite_image.height
+                self._preview_scale = min(scale_w, scale_h, 1.0)
+
         delta = event.delta / 120
         if delta > 0:
             self._preview_scale = min(4.0, self._preview_scale * 1.25)
@@ -1034,7 +1043,8 @@ class CharacterEditor(tk.Toplevel):
     def _update_preview(self):
         """Rebuild composite and render to canvas."""
         self._composite_image = self._composite()
-        self._zoom_fit()
+        if self._preview_scale <= 0:
+            self._zoom_fit()
         self._render_to_canvas()
 
         visible_ids = self._get_visible_layer_ids()
@@ -1119,8 +1129,9 @@ class CharacterEditor(tk.Toplevel):
         )
         self._canvas.config(scrollregion=(0, 0, new_w, new_h))
 
-        # Only update zoom display for full-res renders
+        # Only update zoom display and persist scale for full-res renders
         if not draft:
+            self._preview_scale = scale
             pct = int(scale * 100)
             self._zoom_var.set(f"{pct}%")
 
